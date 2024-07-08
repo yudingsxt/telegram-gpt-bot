@@ -16,11 +16,11 @@ OPENAI_BASE_URL=https://api.openai.com/v1  # 可选，如果你使用自定义 A
 将 your_telegram_bot_token、your_openai_api_key 和 your_admin_telegram_id 替换为实际的值。
 ## 2. 部署机器人
 ### 2.1 下载代码
-将机器人代码保存为 gpt_bot.py。
+将机器人代码保存为 gpt-bot.py。
 ### 2.2 运行机器人
 你可以直接运行机器人：
 ```
-python3 gpt_bot.py
+python3 gpt-bot.py
 ```
 ### 2.3 设置为系统服务（可选）
 创建一个系统服务文件：
@@ -34,7 +34,7 @@ Description=GPT Telegram Bot
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 /path/to/gpt_bot.py
+ExecStart=/usr/bin/python3 /path/to/gpt-bot.py
 WorkingDirectory=/path/to/bot/directory
 User=your_username
 Group=your_group
@@ -43,7 +43,7 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 ```
-替换 /path/to/gpt_bot.py、/path/to/bot/directory、your_username 和 your_group 为实际的值。
+替换 /path/to/gpt-bot.py、/path/to/bot/directory、your_username 和 your_group 为实际的值。
 
 重新加载 systemd，启动并启用服务：
 ```
