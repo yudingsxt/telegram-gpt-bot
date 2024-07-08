@@ -76,13 +76,12 @@ def get_help_message(is_admin=False):
     help_message = (
         "可用的命令：\n"
         "/start - 开始使用机器人并显示帮助信息\n"
-        "/new - 开始新的对话\n"
-        "/cancel - 结束当前会话\n"
         "/redo - 重新生成上一个回答\n"
         "/help - 显示此帮助信息\n"
         "/set_model <model> - 设置您想使用的模型\n"
         "/list_models - 列出所有可用的模型\n"
-        "/current_model - 显示当前使用的模型并结束当前会话\n"
+        "/current_model - 显示当前使用的模型\n"
+        "\n直接发送消息开始新对话，回复机器人消息继续上下文对话。"
     )
     if is_admin:
         help_message += (
@@ -113,22 +112,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(help_message)
     else:
         await update.message.reply_text('抱歉，您没有使用权限。')
-
-async def new_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    if user_id in allowed_users or user_id == ADMIN_ID:
-        user_sessions[user_id] = []
-        await update.message.reply_text('新对话已开始。')
-    else:
-        await update.message.reply_text('抱歉，您没有使用权限。')
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    if user_id in user_sessions:
-        del user_sessions[user_id]
-        await update.message.reply_text('当前会话已结束。')
-    else:
-        await update.message.reply_text('没有活跃的会话。')
 
 async def redo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -164,7 +147,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     message = update.message.text
-    if user_id not in user_sessions:
+    
+    # 检查是否是回复消息
+    is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
+
+    if not is_reply:
+        # 如果不是回复消息，开始新的会话
         user_sessions[user_id] = []
 
     user_sessions[user_id].append({'role': 'user', 'content': message})
@@ -321,8 +309,6 @@ async def current_model_command(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = update.effective_user.id
     if user_id in allowed_users or user_id == ADMIN_ID:
         model = user_models.get(str(user_id), MODELS[0])
-        if user_id in user_sessions:
-            del user_sessions[user_id]
         await update.message.reply_text(f'您当前使用的模型是: {model}。')
     else:
         await update.message.reply_text('抱歉，您没有使用权限。')
@@ -332,8 +318,6 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("new", new_chat))
-    application.add_handler(CommandHandler("cancel", cancel))
     application.add_handler(CommandHandler("redo", redo))
     application.add_handler(CommandHandler("set_api_key", set_api_key))
     application.add_handler(CommandHandler("set_model", set_model))
