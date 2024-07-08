@@ -64,8 +64,6 @@ sudo systemctl enable gpt-bot
 ### 3.2 用户命令
 /start - 开始使用机器人并显示帮助信息  
 /help - 显示帮助信息  
-/new - 开始新的对话  
-/cancel - 结束当前会话  
 /redo - 重新生成上一个回答  
 /set_model <model> - 设置您想使用的模型  
 /list_models - 列出所有可用的模型  
