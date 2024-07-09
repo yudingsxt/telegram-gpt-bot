@@ -1,5 +1,6 @@
 import os
 import json
+import tempfile
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.constants import ParseMode
@@ -146,7 +147,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text('抱歉，您没有使用权限。')
         return
 
-    message = update.message.text
+    is_voice = update.message.voice is not None
+    
+    if is_voice:
+        # 处理语音消息
+        voice_file = await context.bot.get_file(update.message.voice.file_id)
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as voice_ogg:
+            await voice_file.download_to_drive(voice_ogg.name)
+            
+            # 使用 OpenAI 的 Whisper 模型进行语音识别
+            with open(voice_ogg.name, "rb") as audio_file:
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1", 
+                    file=audio_file
+                )
+            
+            message = transcript.text
+            os.unlink(voice_ogg.name)  # 删除临时文件
+    else:
+        # 处理文本消息
+        message = update.message.text
     
     # 检查是否是回复消息
     is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
@@ -163,12 +183,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         response = get_gpt_response(user_id, user_sessions[user_id])
         user_sessions[user_id].append({'role': 'assistant', 'content': response})
-        await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=processing_message.message_id,
-            text=response,
-            parse_mode=ParseMode.MARKDOWN
-        )
+        
+        if is_voice:
+            # 使用 OpenAI 的 TTS 模型生成语音回复
+            speech_file_path = tempfile.mktemp(suffix=".mp3")
+            with client.audio.speech.with_streaming_response.create(
+                model="tts-1",
+                voice="alloy",
+                input=response
+            ) as response_audio:
+                with open(speech_file_path, 'wb') as f:
+                    for chunk in response_audio.iter_bytes():
+                        f.write(chunk)
+            
+            await context.bot.send_voice(
+                chat_id=update.effective_chat.id,
+                voice=open(speech_file_path, 'rb')
+            )
+            os.remove(speech_file_path)
+            
+            await context.bot.delete_message(
+                chat_id=update.effective_chat.id,
+                message_id=processing_message.message_id
+            )
+        else:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=processing_message.message_id,
+                text=response,
+                parse_mode=ParseMode.MARKDOWN
+            )
     except Exception as e:
         print(f"Error in handle_message: {e}")
         await context.bot.edit_message_text(
@@ -328,7 +372,8 @@ def main() -> None:
     application.add_handler(CommandHandler("list_models", list_models))
     application.add_handler(CommandHandler("list_users", list_users))
     application.add_handler(CommandHandler("current_model", current_model_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    #application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler(filters.TEXT | filters.VOICE, handle_message))
 
     application.run_polling()
 
