@@ -8,6 +8,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 from telegram.constants import ParseMode
 from openai import OpenAI
 from dotenv import load_dotenv
+import logging
 
 # 常量定义
 MODELS_FILE = 'models.json'
@@ -18,6 +19,9 @@ DEFAULT_VOICE = 'onyx'
 VALID_VOICES = {'alloy', 'echo', 'fable', 'nova', 'shimmer', 'onyx'}
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # 配置加载和验证
 class Config:
@@ -76,9 +80,10 @@ def get_help_message(is_admin: bool = False) -> str:
         "/help - 显示此帮助信息\n"
         "/set_model <model> - 设置您想使用的模型\n"
         "/list_models - 列出所有可用的模型\n"
-        "/current_model - 显示当前使用的模型\n"
+        "/current_settings - 显示当前使用的设置\n"
         "/set_voice <voice> - 设置TTS声音\n"
         "/toggle_stream - 切换流式输出模式\n"
+        "/draw <prompt> - 使用DALL-E 3生成图像\n"
         "\n直接发送消息开始新对话，回复机器人消息继续上下文对话。"
     )
     if is_admin:
@@ -273,7 +278,7 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     users_list = ", ".join(str(user) for user in allowed_users)
     await update.message.reply_text(f'当前允许的用户: {users_list}')
 
-async def current_model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def current_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if user_id in allowed_users or user_id == Config.ADMIN_ID:
         try:
@@ -287,7 +292,7 @@ async def current_model_command(update: Update, context: ContextTypes.DEFAULT_TY
                 f'流式输出: {"开启" if stream_output else "关闭"}'
             )
         except Exception as e:
-            print(f"Error in current_model_command: {e}")
+            print(f"Error in current_settings: {e}")
             await update.message.reply_text('获取当前设置时发生错误。请稍后再试。')
     else:
         await update.message.reply_text('抱歉，您没有使用权限。')
@@ -403,6 +408,55 @@ def get_gpt_response(user_id: int, messages: list) -> str:
         print(f"Error in get_gpt_response: {e}")
         raise
 
+async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id not in allowed_users and user_id != Config.ADMIN_ID:
+        await update.message.reply_text('抱歉，您没有使用权限。')
+        return
+
+    if not context.args:
+        await update.message.reply_text('请提供绘画提示。')
+        return
+
+    prompt = ' '.join(context.args)
+    processing_message = await update.message.reply_text("正在生成图像，请稍候...")
+
+    try:
+        response = client.images.generate(
+            model="dall-e-3",
+            prompt=prompt,
+            size="1024x1024",
+            quality="high-quality",
+            n=1,
+        )
+
+        logger.info(f"DALL-E API Response: {response}")  # 记录完整的响应
+
+        if response and response.data and len(response.data) > 0:
+            image_url = response.data[0].url
+            if image_url:
+                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image_url)
+                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing_message.message_id)
+            else:
+                raise ValueError("Image URL is None")
+        else:
+            raise ValueError("Invalid response structure from DALL-E API")
+
+    except Exception as e:
+        logger.error(f"Error in draw: {e}", exc_info=True)  # 记录详细的错误信息
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=processing_message.message_id,
+            text=f"抱歉，生成图像时发生了错误: {str(e)}。请稍后再试。"
+        )
+
+async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # 不做任何响应
+    pass
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print(f'Exception while handling an update: {context.error}')
+
 def main() -> None:
     application = Application.builder().token(Config.TOKEN).build()
 
@@ -421,13 +475,21 @@ def main() -> None:
         "remove_model": remove_model,
         "list_models": list_models,
         "list_users": list_users,
-        "current_model": current_model_command
+        "current_settings": current_settings,
+        "draw": draw
     }
 
     for command, handler in commands.items():
         application.add_handler(CommandHandler(command, handler))
 
-    application.add_handler(MessageHandler(filters.TEXT | filters.VOICE, handle_message))
+    # 添加消息处理器
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND | filters.VOICE, handle_message))
+
+    # 添加未知命令处理器
+    application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
+
+    # 添加错误处理器
+    application.add_error_handler(error_handler)
 
     application.run_polling()
 
