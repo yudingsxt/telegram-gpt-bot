@@ -4,7 +4,7 @@ import tempfile
 import asyncio
 from typing import Dict, Set, Any, Optional
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, ChatMemberHandler
 from telegram.constants import ParseMode
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -56,19 +56,27 @@ def save_json(filename: str, data: Any) -> None:
 MODELS: list = load_json(MODELS_FILE, DEFAULT_MODELS)
 allowed_users: Set[int] = set(load_json(USERS_FILE, []))
 user_settings: Dict[str, Dict[str, Any]] = load_json(USER_SETTINGS_FILE, {})
-user_sessions: Dict[int, list] = {}
+user_sessions: Dict[str, list] = {}
+
+# 用户权限检查
+def is_user_allowed(user_id: int, chat_id: int) -> bool:
+    return user_id in allowed_users or user_id == Config.ADMIN_ID or chat_id < 0
+
+# 获取会话key
+def get_session_key(user_id: int, chat_id: int) -> str:
+    return f"{user_id}:{chat_id}"
 
 # 用户设置处理
-def get_user_setting(user_id: int, key: str, default: Any) -> Any:
-    user_id_str = str(user_id)
-    settings = user_settings.get(user_id_str, {})
+def get_user_setting(user_id: int, chat_id: int, key: str, default: Any) -> Any:
+    settings_key = get_session_key(user_id, chat_id)
+    settings = user_settings.get(settings_key, {})
     return settings.get(key, default)
 
-def set_user_setting(user_id: int, key: str, value: Any) -> None:
-    user_id_str = str(user_id)
-    if user_id_str not in user_settings:
-        user_settings[user_id_str] = {}
-    user_settings[user_id_str][key] = value
+def set_user_setting(user_id: int, chat_id: int, key: str, value: Any) -> None:
+    settings_key = get_session_key(user_id, chat_id)
+    if settings_key not in user_settings:
+        user_settings[settings_key] = {}
+    user_settings[settings_key][key] = value
     save_json(USER_SETTINGS_FILE, user_settings)
 
 # 帮助信息生成
@@ -84,6 +92,7 @@ def get_help_message(is_admin: bool = False) -> str:
         "/set_voice <voice> - 设置TTS声音\n"
         "/toggle_stream - 切换流式输出模式\n"
         "/draw <prompt> - 使用DALL-E 3生成图像\n"
+        "/chat <message> - 在群组中开始新的对话\n"
         "\n直接发送消息开始新对话，回复机器人消息继续上下文对话。"
     )
     if is_admin:
@@ -101,7 +110,8 @@ def get_help_message(is_admin: bool = False) -> str:
 # 命令处理函数
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if user_id in allowed_users or user_id == Config.ADMIN_ID:
+    chat_id = update.effective_chat.id
+    if is_user_allowed(user_id, chat_id):
         is_admin = user_id == Config.ADMIN_ID
         help_message = get_help_message(is_admin)
         await update.message.reply_text(f'欢迎使用GPT机器人！\n\n{help_message}')
@@ -110,7 +120,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if user_id in allowed_users or user_id == Config.ADMIN_ID:
+    chat_id = update.effective_chat.id
+    if is_user_allowed(user_id, chat_id):
         is_admin = user_id == Config.ADMIN_ID
         help_message = get_help_message(is_admin)
         await update.message.reply_text(help_message)
@@ -119,14 +130,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def redo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if user_id in user_sessions and len(user_sessions[user_id]) >= 2:
-        user_sessions[user_id].pop()
+    chat_id = update.effective_chat.id
+    session_key = get_session_key(user_id, chat_id)
+    if session_key in user_sessions and len(user_sessions[session_key]) >= 2:
+        user_sessions[session_key].pop()
         processing_message = await update.message.reply_text("正在重新生成回答，请稍候...")
         try:
-            response = get_gpt_response(user_id, user_sessions[user_id])
-            user_sessions[user_id].append({'role': 'assistant', 'content': response})
+            response = get_gpt_response(user_id, chat_id, user_sessions[session_key])
+            user_sessions[session_key].append({'role': 'assistant', 'content': response})
             await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
+                chat_id=chat_id,
                 message_id=processing_message.message_id,
                 text=response,
                 parse_mode=ParseMode.MARKDOWN
@@ -134,7 +147,7 @@ async def redo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             print(f"Error in redo: {e}")
             await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id,
+                chat_id=chat_id,
                 message_id=processing_message.message_id,
                 text="抱歉，重新生成回答时发生了错误。请稍后再试。"
             )
@@ -158,7 +171,8 @@ async def set_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def set_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if user_id not in allowed_users and user_id != Config.ADMIN_ID:
+    chat_id = update.effective_chat.id
+    if not is_user_allowed(user_id, chat_id):
         await update.message.reply_text('抱歉，您没有使用权限。')
         return
 
@@ -166,12 +180,13 @@ async def set_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f'请选择有效的模型: {", ".join(MODELS)}')
         return
 
-    set_user_setting(user_id, 'model', context.args[0])
+    set_user_setting(user_id, chat_id, 'model', context.args[0])
     await update.message.reply_text(f'您的模型已更改为 {context.args[0]}。')
 
 async def set_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if user_id not in allowed_users and user_id != Config.ADMIN_ID:
+    chat_id = update.effective_chat.id
+    if not is_user_allowed(user_id, chat_id):
         await update.message.reply_text('抱歉，您没有使用权限。')
         return
 
@@ -179,18 +194,19 @@ async def set_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f'请选择有效的声音: {", ".join(VALID_VOICES)}')
         return
 
-    set_user_setting(user_id, 'voice', context.args[0])
+    set_user_setting(user_id, chat_id, 'voice', context.args[0])
     await update.message.reply_text(f'您的TTS声音已设置为 {context.args[0]}。')
 
 async def toggle_stream_output(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if user_id not in allowed_users and user_id != Config.ADMIN_ID:
+    chat_id = update.effective_chat.id
+    if not is_user_allowed(user_id, chat_id):
         await update.message.reply_text('抱歉，您没有使用权限。')
         return
 
-    current_setting = get_user_setting(user_id, 'stream_output', False)
+    current_setting = get_user_setting(user_id, chat_id, 'stream_output', False)
     new_setting = not current_setting
-    set_user_setting(user_id, 'stream_output', new_setting)
+    set_user_setting(user_id, chat_id, 'stream_output', new_setting)
     await update.message.reply_text(f'流式输出已{"开启" if new_setting else "关闭"}。')
 
 async def add_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -258,7 +274,7 @@ async def remove_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if remove_model_name in MODELS:
         MODELS.remove(remove_model_name)
         save_json(MODELS_FILE, MODELS)
-        for user, settings in user_settings.items():
+        for settings_key, settings in user_settings.items():
             if settings.get('model') == remove_model_name:
                 settings['model'] = MODELS[0]
         save_json(USER_SETTINGS_FILE, user_settings)
@@ -280,11 +296,12 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def current_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if user_id in allowed_users or user_id == Config.ADMIN_ID:
+    chat_id = update.effective_chat.id
+    if is_user_allowed(user_id, chat_id):
         try:
-            model = get_user_setting(user_id, 'model', MODELS[0])
-            voice = get_user_setting(user_id, 'voice', DEFAULT_VOICE)
-            stream_output = get_user_setting(user_id, 'stream_output', False)
+            model = get_user_setting(user_id, chat_id, 'model', MODELS[0])
+            voice = get_user_setting(user_id, chat_id, 'voice', DEFAULT_VOICE)
+            stream_output = get_user_setting(user_id, chat_id, 'stream_output', False)
             await update.message.reply_text(
                 f'您当前的设置：\n'
                 f'模型: {model}\n'
@@ -299,7 +316,8 @@ async def current_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if user_id not in allowed_users and user_id != Config.ADMIN_ID:
+    chat_id = update.effective_chat.id
+    if not is_user_allowed(user_id, chat_id):
         await update.message.reply_text('抱歉，您没有使用权限。')
         return
 
@@ -312,23 +330,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
 
+    session_key = get_session_key(user_id, chat_id)
     if not is_reply:
-        user_sessions[user_id] = []
+        # 如果不是回复机器人的消息，并且不在私聊中，则忽略
+        if chat_id < 0:  # 群组的 chat_id 是负数
+            return
+        user_sessions[session_key] = []
 
-    user_sessions[user_id].append({'role': 'user', 'content': message})
+    if session_key not in user_sessions:
+        user_sessions[session_key] = []
+
+    user_sessions[session_key].append({'role': 'user', 'content': message})
     
     processing_message = await update.message.reply_text("正在处理您的请求，请稍候...")
 
     try:
-        response = get_gpt_response(user_id, user_sessions[user_id])
-        user_sessions[user_id].append({'role': 'assistant', 'content': response})
+        response = get_gpt_response(user_id, chat_id, user_sessions[session_key])
+        user_sessions[session_key].append({'role': 'assistant', 'content': response})
         
-        voice = get_user_setting(user_id, 'voice', DEFAULT_VOICE)
-        stream_output = get_user_setting(user_id, 'stream_output', False)
+        voice = get_user_setting(user_id, chat_id, 'voice', DEFAULT_VOICE)
+        stream_output = get_user_setting(user_id, chat_id, 'stream_output', False)
         
         if is_voice:
             await send_voice_response(update, context, response, voice)
-            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing_message.message_id)
+            await context.bot.delete_message(chat_id=chat_id, message_id=processing_message.message_id)
             
             if stream_output:
                 await stream_response(update, context, response)
@@ -336,11 +361,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
         else:
             if stream_output:
-                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing_message.message_id)
+                await context.bot.delete_message(chat_id=chat_id, message_id=processing_message.message_id)
                 await stream_response(update, context, response)
             else:
                 await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
+                    chat_id=chat_id,
                     message_id=processing_message.message_id,
                     text=response,
                     parse_mode=ParseMode.MARKDOWN
@@ -348,7 +373,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as e:
         print(f"Error in handle_message: {e}")
         await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
+            chat_id=chat_id,
             message_id=processing_message.message_id,
             text="抱歉，处理您的请求时发生了错误。请稍后再试。"
         )
@@ -396,9 +421,9 @@ async def stream_response(update: Update, context: ContextTypes.DEFAULT_TYPE, re
             parse_mode=ParseMode.MARKDOWN
         )
 
-def get_gpt_response(user_id: int, messages: list) -> str:
+def get_gpt_response(user_id: int, chat_id: int, messages: list) -> str:
     try:
-        model = get_user_setting(user_id, 'model', MODELS[0])
+        model = get_user_setting(user_id, chat_id, 'model', MODELS[0])
         response = client.chat.completions.create(
             model=model,
             messages=messages
@@ -410,7 +435,8 @@ def get_gpt_response(user_id: int, messages: list) -> str:
 
 async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if user_id not in allowed_users and user_id != Config.ADMIN_ID:
+    chat_id = update.effective_chat.id
+    if not is_user_allowed(user_id, chat_id):
         await update.message.reply_text('抱歉，您没有使用权限。')
         return
 
@@ -435,8 +461,8 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if response and response.data and len(response.data) > 0:
             image_url = response.data[0].url
             if image_url:
-                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image_url)
-                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing_message.message_id)
+                await context.bot.send_photo(chat_id=chat_id, photo=image_url)
+                await context.bot.delete_message(chat_id=chat_id, message_id=processing_message.message_id)
             else:
                 raise ValueError("Image URL is None")
         else:
@@ -445,9 +471,44 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.error(f"Error in draw: {e}", exc_info=True)  # 记录详细的错误信息
         await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
+            chat_id=chat_id,
             message_id=processing_message.message_id,
             text=f"抱歉，生成图像时发生了错误: {str(e)}。请稍后再试。"
+        )
+
+async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    if not is_user_allowed(user_id, chat_id):
+        await update.message.reply_text('抱歉，您没有使用权限。')
+        return
+
+    if not context.args:
+        await update.message.reply_text('请在 /chat 命令后输入您的消息。')
+        return
+
+    message = ' '.join(context.args)
+    session_key = get_session_key(user_id, chat_id)
+    user_sessions[session_key] = [{'role': 'user', 'content': message}]
+
+    processing_message = await update.message.reply_text("正在处理您的请求，请稍候...")
+
+    try:
+        response = get_gpt_response(user_id, chat_id, user_sessions[session_key])
+        user_sessions[session_key].append({'role': 'assistant', 'content': response})
+        
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=processing_message.message_id,
+            text=response,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        print(f"Error in chat_command: {e}")
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=processing_message.message_id,
+            text="抱歉，处理您的请求时发生了错误。请稍后再试。"
         )
 
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -456,6 +517,11 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     print(f'Exception while handling an update: {context.error}')
+
+async def group_chat_created(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    result = update.chat_member
+    if result.new_chat_member.status == "member" and result.new_chat_member.user.id == context.bot.id:
+        await update.effective_chat.send_message("感谢将我添加到群组!使用 /help 查看可用命令。")
 
 def main() -> None:
     application = Application.builder().token(Config.TOKEN).build()
@@ -476,7 +542,8 @@ def main() -> None:
         "list_models": list_models,
         "list_users": list_users,
         "current_settings": current_settings,
-        "draw": draw
+        "draw": draw,
+        "chat": chat_command 
     }
 
     for command, handler in commands.items():
@@ -487,6 +554,9 @@ def main() -> None:
 
     # 添加未知命令处理器
     application.add_handler(MessageHandler(filters.COMMAND, unknown_command))
+
+    # 添加群组创建处理器
+    application.add_handler(ChatMemberHandler(group_chat_created, ChatMemberHandler.CHAT_MEMBER))
 
     # 添加错误处理器
     application.add_error_handler(error_handler)
