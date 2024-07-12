@@ -68,15 +68,27 @@ def get_session_key(user_id: int, chat_id: int) -> str:
 
 # 用户设置处理
 def get_user_setting(user_id: int, chat_id: int, key: str, default: Any) -> Any:
-    settings_key = get_session_key(user_id, chat_id)
-    settings = user_settings.get(settings_key, {})
-    return settings.get(key, default)
+    user_id_str = str(user_id)
+    chat_id_str = str(chat_id)
+    if user_id_str in user_settings:
+        if chat_id_str in user_settings[user_id_str].get("chats", {}):
+            return user_settings[user_id_str]["chats"][chat_id_str].get(key, 
+                   user_settings[user_id_str]["global"].get(key, default))
+        else:
+            return user_settings[user_id_str]["global"].get(key, default)
+    return default
 
 def set_user_setting(user_id: int, chat_id: int, key: str, value: Any) -> None:
-    settings_key = get_session_key(user_id, chat_id)
-    if settings_key not in user_settings:
-        user_settings[settings_key] = {}
-    user_settings[settings_key][key] = value
+    user_id_str = str(user_id)
+    chat_id_str = str(chat_id)
+    if user_id_str not in user_settings:
+        user_settings[user_id_str] = {"global": {}, "chats": {}}
+    if chat_id_str == user_id_str:  # 如果是私聊，设置全局设置
+        user_settings[user_id_str]["global"][key] = value
+    else:
+        if chat_id_str not in user_settings[user_id_str]["chats"]:
+            user_settings[user_id_str]["chats"][chat_id_str] = {}
+        user_settings[user_id_str]["chats"][chat_id_str][key] = value
     save_json(USER_SETTINGS_FILE, user_settings)
 
 # 帮助信息生成
@@ -299,15 +311,30 @@ async def current_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat_id = update.effective_chat.id
     if is_user_allowed(user_id, chat_id):
         try:
-            model = get_user_setting(user_id, chat_id, 'model', MODELS[0])
-            voice = get_user_setting(user_id, chat_id, 'voice', DEFAULT_VOICE)
-            stream_output = get_user_setting(user_id, chat_id, 'stream_output', False)
-            await update.message.reply_text(
-                f'您当前的设置：\n'
-                f'模型: {model}\n'
-                f'TTS声音: {voice}\n'
-                f'流式输出: {"开启" if stream_output else "关闭"}'
+            global_model = get_user_setting(user_id, user_id, 'model', MODELS[0])
+            global_voice = get_user_setting(user_id, user_id, 'voice', DEFAULT_VOICE)
+            global_stream_output = get_user_setting(user_id, user_id, 'stream_output', False)
+            
+            chat_model = get_user_setting(user_id, chat_id, 'model', global_model)
+            chat_voice = get_user_setting(user_id, chat_id, 'voice', global_voice)
+            chat_stream_output = get_user_setting(user_id, chat_id, 'stream_output', global_stream_output)
+            
+            settings_message = (
+                f'您的全局设置：\n'
+                f'模型: {global_model}\n'
+                f'TTS声音: {global_voice}\n'
+                f'流式输出: {"开启" if global_stream_output else "关闭"}\n\n'
             )
+            
+            if chat_id != user_id:
+                settings_message += (
+                    f'当前聊天的设置：\n'
+                    f'模型: {chat_model}\n'
+                    f'TTS声音: {chat_voice}\n'
+                    f'流式输出: {"开启" if chat_stream_output else "关闭"}'
+                )
+            
+            await update.message.reply_text(settings_message)
         except Exception as e:
             print(f"Error in current_settings: {e}")
             await update.message.reply_text('获取当前设置时发生错误。请稍后再试。')
