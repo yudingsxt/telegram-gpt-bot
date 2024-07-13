@@ -8,7 +8,6 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 from telegram.constants import ParseMode
 from openai import OpenAI
 from dotenv import load_dotenv
-import logging
 
 # 常量定义
 MODELS_FILE = 'models.json'
@@ -19,9 +18,6 @@ DEFAULT_VOICE = 'onyx'
 VALID_VOICES = {'alloy', 'echo', 'fable', 'nova', 'shimmer', 'onyx'}
 
 load_dotenv()
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # 配置加载和验证
 class Config:
@@ -157,7 +153,6 @@ async def redo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 parse_mode=ParseMode.MARKDOWN
             )
         except Exception as e:
-            print(f"Error in redo: {e}")
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=processing_message.message_id,
@@ -336,7 +331,6 @@ async def current_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             
             await update.message.reply_text(settings_message)
         except Exception as e:
-            print(f"Error in current_settings: {e}")
             await update.message.reply_text('获取当前设置时发生错误。请稍后再试。')
     else:
         await update.message.reply_text('抱歉，您没有使用权限。')
@@ -359,7 +353,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     session_key = get_session_key(user_id, chat_id)
     if not is_reply:
-        # 如果不是回复机器人的消息，并且不在私聊中，则忽略
         if chat_id < 0:  # 群组的 chat_id 是负数
             return
         user_sessions[session_key] = []
@@ -398,7 +391,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     parse_mode=ParseMode.MARKDOWN
                 )
     except Exception as e:
-        print(f"Error in handle_message: {e}")
         await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=processing_message.message_id,
@@ -457,7 +449,6 @@ def get_gpt_response(user_id: int, chat_id: int, messages: list) -> str:
         )
         return response.choices[0].message.content
     except Exception as e:
-        print(f"Error in get_gpt_response: {e}")
         raise
 
 async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -483,8 +474,6 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             n=1,
         )
 
-        logger.info(f"DALL-E API Response: {response}")  # 记录完整的响应
-
         if response and response.data and len(response.data) > 0:
             image_url = response.data[0].url
             if image_url:
@@ -496,7 +485,6 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             raise ValueError("Invalid response structure from DALL-E API")
 
     except Exception as e:
-        logger.error(f"Error in draw: {e}", exc_info=True)  # 记录详细的错误信息
         await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=processing_message.message_id,
@@ -531,7 +519,6 @@ async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             parse_mode=ParseMode.MARKDOWN
         )
     except Exception as e:
-        print(f"Error in chat_command: {e}")
         await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=processing_message.message_id,
@@ -543,7 +530,7 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     pass
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    print(f'Exception while handling an update: {context.error}')
+    pass
 
 async def group_chat_created(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     result = update.chat_member
